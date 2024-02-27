@@ -3,9 +3,20 @@
 #include "MiscFunctions.hpp"
 
 #include "../Compositor.hpp"
+#include "../managers/FrameSchedulingManager.hpp"
 
-int ratHandler(void* data) {
+static int ratHandler(void* data) {
     g_pHyprRenderer->renderMonitor((CMonitor*)data);
+
+    return 1;
+}
+
+static int wlFrameCallback(void* data) {
+    const auto PMONITOR = (CMonitor*)data;
+
+    Debug::log(LOG, "wlFrameCallback");
+
+    g_pFrameSchedulingManager->onFrameNeeded(PMONITOR);
 
     return 1;
 }
@@ -23,6 +34,7 @@ CMonitor::~CMonitor() {
     hyprListener_monitorDamage.removeCallback();
     hyprListener_monitorNeedsFrame.removeCallback();
     hyprListener_monitorCommit.removeCallback();
+    hyprListener_monitorPresent.removeCallback();
     hyprListener_monitorBind.removeCallback();
 }
 
@@ -34,6 +46,7 @@ void CMonitor::onConnect(bool noRule) {
     hyprListener_monitorNeedsFrame.removeCallback();
     hyprListener_monitorCommit.removeCallback();
     hyprListener_monitorBind.removeCallback();
+    hyprListener_monitorPresent.removeCallback();
     hyprListener_monitorFrame.initCallback(&output->events.frame, &Events::listener_monitorFrame, this);
     hyprListener_monitorDestroy.initCallback(&output->events.destroy, &Events::listener_monitorDestroy, this);
     hyprListener_monitorStateRequest.initCallback(&output->events.request_state, &Events::listener_monitorStateRequest, this);
@@ -41,6 +54,7 @@ void CMonitor::onConnect(bool noRule) {
     hyprListener_monitorNeedsFrame.initCallback(&output->events.needs_frame, &Events::listener_monitorNeedsFrame, this);
     hyprListener_monitorCommit.initCallback(&output->events.commit, &Events::listener_monitorCommit, this);
     hyprListener_monitorBind.initCallback(&output->events.bind, &Events::listener_monitorBind, this);
+    hyprListener_monitorPresent.initCallback(&output->events.present, &Events::listener_monitorPresent, this);
 
     tearingState.canTear = wlr_backend_is_drm(output->backend); // tearing only works on drm
 
@@ -195,9 +209,12 @@ void CMonitor::onConnect(bool noRule) {
     if (!found)
         g_pCompositor->setActiveMonitor(this);
 
-    renderTimer = wl_event_loop_add_timer(g_pCompositor->m_sWLEventLoop, ratHandler, this);
+    renderTimer       = wl_event_loop_add_timer(g_pCompositor->m_sWLEventLoop, ratHandler, this);
+    frameNeededSource = wl_event_loop_add_timer(g_pCompositor->m_sWLEventLoop, wlFrameCallback, this);
 
     g_pCompositor->scheduleFrameForMonitor(this);
+
+    g_pFrameSchedulingManager->registerMonitor(this);
 }
 
 void CMonitor::onDisconnect(bool destroy) {
@@ -206,6 +223,8 @@ void CMonitor::onDisconnect(bool destroy) {
         wl_event_source_remove(renderTimer);
         renderTimer = nullptr;
     }
+
+    g_pFrameSchedulingManager->unregisterMonitor(this);
 
     if (!m_bEnabled || g_pCompositor->m_bIsShuttingDown)
         return;
@@ -240,6 +259,7 @@ void CMonitor::onDisconnect(bool destroy) {
     hyprListener_monitorNeedsFrame.removeCallback();
     hyprListener_monitorCommit.removeCallback();
     hyprListener_monitorBind.removeCallback();
+    hyprListener_monitorPresent.removeCallback();
 
     for (size_t i = 0; i < 4; ++i) {
         for (auto& ls : m_aLayerSurfaceLayers[i]) {
